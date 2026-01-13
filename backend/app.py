@@ -18,6 +18,35 @@ CORS(app, resources={r"/api/*": {"origins": "*"}}, expose_headers=[
 ])
 # app.py
 import os
+import urllib.request
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+
+# 确保 data 目录存在
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# 数据文件 URL（替换为你的 GitHub Release 文件链接）
+DATA_URLS = {
+    "dem.tif": "https://github.com/你的用户名/geo-vis-course/releases/download/v1.0/dem.tif",
+    "seismic.sgy": "https://github.com/你的用户名/geo-vis-course/releases/download/v1.0/seismic.sgy",
+}
+
+def ensure_data_files():
+    """确保数据文件存在，不存在则下载"""
+    for filename, url in DATA_URLS.items():
+        filepath = os.path.join(DATA_DIR, filename)
+        if not os.path.exists(filepath):
+            print(f"Downloading {filename}...")
+            try:
+                urllib.request.urlretrieve(url, filepath)
+                print(f"Downloaded {filename} successfully")
+            except Exception as e:
+                print(f"Failed to download {filename}: {e}")
+
+# 启动时下载数据
+ensure_data_files()
+import os
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
