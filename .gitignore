@@ -1,0 +1,11 @@
+# 数据文件（太大无法上传GitHub，后续单独处理）
+backend/data/*.tif
+backend/data/*.tiff
+backend/data/*.sgy
+backend/data/*.segy
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+.env
