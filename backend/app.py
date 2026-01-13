@@ -11,14 +11,14 @@ from segy_service import (
     read_segy_basic_info, get_trace_gather,
     gather_to_density_image, gather_to_wiggle_polylines
 )
-
+import os
+import urllib.request
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}}, expose_headers=[
     "X-Dimensions", "X-Spacing", "X-Range", "X-DType"
 ])
 # app.py
-import os
-import urllib.request
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -28,8 +28,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 # 数据文件 URL（替换为你的 GitHub Release 文件链接）
 DATA_URLS = {
-    "dem.tif": "https://github.com/你的用户名/geo-vis-course/releases/download/v1.0/dem.tif",
-    "seismic.sgy": "https://github.com/你的用户名/geo-vis-course/releases/download/v1.0/seismic.sgy",
+    "dem.tif": "https://github.com/lsljdj225-alt/geo-vis-course/releases/download/v1.0/dem.tif",
+    "seismic.sgy": "https://github.com/lsljdj225-alt/geo-vis-course/releases/download/v1.0/seismic.sgy",
 }
 
 def ensure_data_files():
