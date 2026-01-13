@@ -5,10 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>地学数据三维可视化系统</title>
   <link rel="stylesheet" href="./style.css" />
-  <!-- vtk.js -->
-  <script src="https://unpkg.com/vtk.js@29.5.2/vtk.js"></script>
-  <!-- geotiff.js 用于读取 DEM.tif -->
-  <script src="https://unpkg.com/geotiff@2.1.3/dist-browser/geotiff.js"></script>
+  <script src="https://unpkg.com/vtk.js"></script>
 </head>
 
 <body>
@@ -16,27 +13,22 @@
   <div id="toolbar">
     <!-- 组1：文件选择 -->
     <div class="tool-group">
-      <label class="file-label">
+      <label class="file-btn">
+        选择DEM文件
         <input type="file" id="demFileInput" accept=".tif,.tiff" style="display:none;">
-        <button id="btnSelectDem" class="file-btn">📁 选择DEM文件</button>
       </label>
-      <span id="demFileName" class="file-name">未选择</span>
-    </div>
-
-    <div class="tool-group">
-      <label class="file-label">
+      <label class="file-btn">
+        选择SEGY文件
         <input type="file" id="segyFileInput" accept=".sgy,.segy" style="display:none;">
-        <button id="btnSelectSegy" class="file-btn">📁 选择SEGY文件</button>
       </label>
-      <span id="segyFileName" class="file-name">未选择</span>
     </div>
 
     <!-- 组2：可视化按钮（互斥） -->
     <div class="tool-group">
-      <button id="btnDem" class="viz-btn" data-mode="dem" disabled>加载地形(DEM)</button>
-      <button id="btnDensity" class="viz-btn" data-mode="density" disabled>变密度</button>
-      <button id="btnWiggle" class="viz-btn" data-mode="wiggle" disabled>变面积</button>
-      <button id="btnVolume" class="viz-btn" data-mode="volume" disabled>体渲染</button>
+      <button id="btnDem" class="vis-btn" disabled>加载地形(DEM)</button>
+      <button id="btnDensity" class="vis-btn" disabled>变密度</button>
+      <button id="btnWiggle" class="vis-btn" disabled>变面积</button>
+      <button id="btnVolume" class="vis-btn" disabled>体渲染</button>
     </div>
 
     <!-- 组3：色带预设 -->
@@ -64,19 +56,11 @@
 
     <!-- 组5：SEGY参数 -->
     <div class="tool-group" style="border:none;">
-      <label>起始道:
-        <input id="segyStart" type="number" value="0" style="width:70px;" title="起始道号">
-      </label>
-      <label>道数:
-        <input id="segyCount" type="number" value="200" style="width:70px;" title="读取道数">
+      <label>地震参数:
+        <input id="segyStart" type="number" value="0" placeholder="起始道" style="width:70px;" title="起始道号">
+        <input id="segyCount" type="number" value="200" placeholder="道数" style="width:70px;" title="读取道数">
       </label>
     </div>
-  </div>
-
-  <!-- 加载提示 -->
-  <div id="loadingOverlay" class="hidden">
-    <div class="loading-spinner"></div>
-    <div class="loading-text">正在处理数据...</div>
   </div>
 
   <!-- 主内容区 -->
@@ -87,11 +71,20 @@
     <!-- 右侧控制面板 -->
     <div id="panel">
 
-      <!-- 卡片1：调色盘编辑器 -->
+      <!-- 卡片1：文件状态 -->
+      <div class="panel-card">
+        <h3>已加载文件</h3>
+        <div id="fileStatus" class="status-box">
+          <div><strong>DEM文件：</strong><span id="demFileName">未选择</span></div>
+          <div><strong>SEGY文件：</strong><span id="segyFileName">未选择</span></div>
+        </div>
+      </div>
+
+      <!-- 卡片2：调色盘编辑器 -->
       <div class="panel-card">
         <h3>交互式调色盘</h3>
         <div class="info-text">
-          <p>点击添加控制点，拖拽调整位置，上下拖动调整透明度。</p>
+          <p>拖拽调整位置，上下拖动调整透明度。</p>
         </div>
         <canvas id="cmapCanvas" width="380" height="200"></canvas>
         <div class="control-row">
@@ -116,22 +109,12 @@
         <button id="btnApplyCMap" class="action-btn" style="margin-top:15px;">应用调色盘</button>
       </div>
 
-      <!-- 卡片2：当前状态 -->
+      <!-- 卡片3：坐标信息 -->
       <div class="panel-card">
-        <h3>当前状态</h3>
-        <div id="currentMode" class="status-box">
-          <div style="text-align:center; color:#9ca3af;">
-            请先选择数据文件，然后点击可视化按钮
-          </div>
-        </div>
-      </div>
-
-      <!-- 卡片3：数据信息 -->
-      <div class="panel-card">
-        <h3>数据信息</h3>
+        <h3>当前数据信息</h3>
         <div id="axisInfo" class="status-box">
           <div style="text-align:center; color:#9ca3af;">
-            暂无数据
+            暂无数据，请选择文件并点击可视化按钮
           </div>
         </div>
       </div>
@@ -141,11 +124,10 @@
         <h3>操作指南</h3>
         <div class="info-text">
           <ul>
-            <li><strong>选择文件</strong>：点击"选择DEM/SEGY文件"按钮</li>
-            <li><strong>切换显示</strong>：点击可视化按钮显示，再点击清除</li>
             <li><strong>旋转</strong>：鼠标左键拖拽</li>
-            <li><strong>平移</strong>：Shift + 左键 或 中键拖拽</li>
+            <li><strong>平移</strong>：Shift + 左键 或 鼠标中键拖拽</li>
             <li><strong>缩放</strong>：鼠标滚轮</li>
+            <li><strong>切换</strong>：再次点击同一按钮可清除当前显示</li>
           </ul>
         </div>
       </div>

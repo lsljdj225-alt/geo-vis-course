@@ -1,31 +1,8 @@
 /**
- * main.js - 地学数据三维可视化系统
- * 功能：
- * - 本地文件读取（DEM.tif 和 SEGY）
- * - DEM 三维曲面可视化
- * - SEGY 2D：变密度/变面积
- * - SEGY 3D：体渲染
- * - 按钮互斥和 toggle 功能
- * - 性能优化
+ * main.js
+ * 纯前端版本 - 直接读取本地文件
+ * 功能：DEM曲面、SEGY变密度/变面积/体渲染
  */
-
-// ======================= 全局状态管理 =======================
-const AppState = {
-  // 当前激活的可视化模式：null | 'dem' | 'density' | 'wiggle' | 'volume'
-  currentMode: null,
-
-  // 已加载的数据
-  demData: null,      // { width, height, data, min, max }
-  segyData: null,     // { traces: Float32Array[], sampleCount, traceCount, dt }
-
-  // 文件信息
-  demFileName: null,
-  segyFileName: null,
-
-  // 渲染相关标志
-  isRendering: false,
-  renderPending: false,
-};
 
 // ======================= vtk.js 初始化 =======================
 const fullScreenRenderer = vtk.Rendering.Misc.vtkFullScreenRenderWindow.newInstance({
@@ -36,7 +13,6 @@ const renderer = fullScreenRenderer.getRenderer();
 const renderWindow = fullScreenRenderer.getRenderWindow();
 const interactor = renderWindow.getInteractor();
 
-// 设置背景色
 renderer.setBackground(0.18, 0.2, 0.25);
 
 // 方向轴
@@ -51,84 +27,133 @@ axesWidget.setViewportCorner(
 );
 axesWidget.setViewportSize(0.15);
 
-// ======================= 渲染对象存储 =======================
+// ======================= 全局状态 =======================
+// 存储用户选择的文件数据
+let demFileData = null;      // DEM 文件的 ArrayBuffer
+let segyFileData = null;     // SEGY 文件的 ArrayBuffer
+let segyInfo = null;         // SEGY 基本信息
+
+// 当前激活的可视化类型：'dem' | 'density' | 'wiggle' | 'volume' | null
+let activeVisualization = null;
+
+// DEM 相关
 let demActor = null;
 let demMapper = null;
 let scalarBarActor = null;
+
+// Volume 相关
 let volumeActor = null;
 let volumeMapper = null;
 let volumeScalarRange = null;
+
+// SEGY 2D 相关
 let segy2DActor = null;
 let segy2DMapper = null;
 let segy2DWiggleActors = [];
 let segy2DFillActors = [];
 
-// ======================= 性能优化：节流渲染 =======================
-let renderTimeout = null;
-function scheduleRender() {
-  if (renderTimeout) return;
-  renderTimeout = requestAnimationFrame(() => {
-    renderTimeout = null;
-    renderWindow.render();
-  });
+// ======================= 文件读取 =======================
+document.getElementById("demFileInput").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  try {
+    demFileData = await file.arrayBuffer();
+    document.getElementById("demFileName").textContent = file.name;
+    document.getElementById("btnDem").disabled = false;
+    console.log("DEM file loaded:", file.name, demFileData.byteLength, "bytes");
+  } catch (err) {
+    alert("读取DEM文件失败: " + err.message);
+  }
+});
+
+document.getElementById("segyFileInput").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  try {
+    segyFileData = await file.arrayBuffer();
+    document.getElementById("segyFileName").textContent = file.name;
+
+    // 解析 SEGY 基本信息
+    segyInfo = parseSegyInfo(segyFileData);
+    console.log("SEGY file loaded:", file.name, segyFileData.byteLength, "bytes");
+    console.log("SEGY info:", segyInfo);
+
+    // 启用 SEGY 相关按钮
+    document.getElementById("btnDensity").disabled = false;
+    document.getElementById("btnWiggle").disabled = false;
+    document.getElementById("btnVolume").disabled = false;
+  } catch (err) {
+    alert("读取SEGY文件失败: " + err.message);
+  }
+});
+
+// ======================= SEGY 解析 =======================
+function parseSegyInfo(buffer) {
+  const view = new DataView(buffer);
+
+  // SEGY 文件头在 3200-3600 字节（二进制头）
+  // 采样间隔在 3216-3218 (2字节, big-endian)
+  // 每道采样点数在 3220-3222 (2字节, big-endian)
+  const dtMicroseconds = view.getInt16(3216, false); // big-endian
+  const sampleCount = view.getInt16(3220, false);
+
+  // 计算道数：(文件总长 - 3600) / (240 + sampleCount * 4)
+  const traceLength = 240 + sampleCount * 4;
+  const traceCount = Math.floor((buffer.byteLength - 3600) / traceLength);
+
+  return {
+    dtMicroseconds: dtMicroseconds > 0 ? dtMicroseconds : 1000,
+    sampleCount: sampleCount > 0 ? sampleCount : 128,
+    traceCount: traceCount > 0 ? traceCount : 0,
+  };
 }
 
-// ======================= UI 元素引用 =======================
-const btnSelectDem = document.getElementById("btnSelectDem");
-const btnSelectSegy = document.getElementById("btnSelectSegy");
-const demFileInput = document.getElementById("demFileInput");
-const segyFileInput = document.getElementById("segyFileInput");
-const demFileNameSpan = document.getElementById("demFileName");
-const segyFileNameSpan = document.getElementById("segyFileName");
-const loadingOverlay = document.getElementById("loadingOverlay");
-const currentModeDiv = document.getElementById("currentMode");
-const axisInfoDiv = document.getElementById("axisInfo");
+function getSegyTraces(buffer, startTrace, count) {
+  if (!segyInfo) return null;
 
-// 可视化按钮
-const vizButtons = {
-  dem: document.getElementById("btnDem"),
-  density: document.getElementById("btnDensity"),
-  wiggle: document.getElementById("btnWiggle"),
-  volume: document.getElementById("btnVolume"),
-};
+  const { sampleCount, traceCount } = segyInfo;
+  const traceLength = 240 + sampleCount * 4;
 
-// ======================= 工具函数 =======================
-function showLoading(show = true) {
-  loadingOverlay.classList.toggle("hidden", !show);
+  const actualStart = Math.max(0, Math.min(startTrace, traceCount - 1));
+  const actualCount = Math.min(count, traceCount - actualStart);
+
+  const data = new Float32Array(actualCount * sampleCount);
+
+  for (let i = 0; i < actualCount; i++) {
+    const traceOffset = 3600 + (actualStart + i) * traceLength + 240;
+    const view = new DataView(buffer, traceOffset, sampleCount * 4);
+
+    for (let j = 0; j < sampleCount; j++) {
+      // IBM 浮点转 IEEE（简化版，假设是 IEEE float）
+      data[i * sampleCount + j] = view.getFloat32(j * 4, false);
+    }
+  }
+
+  return {
+    data,
+    traceCount: actualCount,
+    sampleCount,
+  };
 }
 
-function updateStatus(text) {
-  currentModeDiv.innerHTML = text;
-}
-
-function updateAxisInfo(text) {
-  axisInfoDiv.innerHTML = text;
-}
-
-function clamp(v, a, b) {
-  return Math.max(a, Math.min(b, v));
-}
-
-// ======================= 清除各类显示 =======================
+// ======================= 清除显示 =======================
 function removeVolumeIfAny() {
   if (!volumeActor) return;
-  try {
-    if (renderer.removeVolume) renderer.removeVolume(volumeActor);
-    else renderer.removeViewProp(volumeActor);
-  } catch (e) {
-    console.warn("removeVolume error:", e);
-  }
+  if (renderer.removeVolume) renderer.removeVolume(volumeActor);
+  else renderer.removeViewProp(volumeActor);
   volumeActor = null;
   volumeMapper = null;
   volumeScalarRange = null;
 }
 
 function removeDEMIfAny() {
-  if (demActor) {
-    renderer.removeActor(demActor);
-    demActor = null;
-    demMapper = null;
-  }
+  if (!demActor) return;
+  renderer.removeActor(demActor);
+  demActor = null;
+  demMapper = null;
+
   if (scalarBarActor) {
     renderer.removeActor2D(scalarBarActor);
     scalarBarActor = null;
@@ -145,6 +170,7 @@ function removeSegy2DActors() {
     renderer.removeActor(actor);
   }
   segy2DWiggleActors = [];
+
   for (const actor of segy2DFillActors) {
     renderer.removeActor(actor);
   }
@@ -155,199 +181,55 @@ function clearAllDisplays() {
   removeVolumeIfAny();
   removeDEMIfAny();
   removeSegy2DActors();
-  scheduleRender();
+  renderWindow.render();
 }
 
 // ======================= 按钮状态管理 =======================
 function updateButtonStates() {
-  // DEM 按钮：只有加载了 DEM 数据才启用
-  vizButtons.dem.disabled = !AppState.demData;
-
-  // SEGY 相关按钮：只有加载了 SEGY 数据才启用
-  vizButtons.density.disabled = !AppState.segyData;
-  vizButtons.wiggle.disabled = !AppState.segyData;
-  vizButtons.volume.disabled = !AppState.segyData;
-
-  // 更新按钮激活状态
-  Object.entries(vizButtons).forEach(([mode, btn]) => {
-    btn.classList.toggle("active", AppState.currentMode === mode);
-  });
-}
-
-function setCurrentMode(mode) {
-  if (AppState.currentMode === mode) {
-    // 再次点击同一按钮：清除显示
-    clearAllDisplays();
-    AppState.currentMode = null;
-    updateStatus('<div style="text-align:center; color:#9ca3af;">已清除显示</div>');
-    updateAxisInfo('<div style="text-align:center; color:#9ca3af;">暂无数据</div>');
-  } else {
-    // 点击不同按钮：切换模式
-    clearAllDisplays();
-    AppState.currentMode = mode;
-  }
-  updateButtonStates();
-}
-
-// ======================= 文件选择处理 =======================
-btnSelectDem.addEventListener("click", () => demFileInput.click());
-btnSelectSegy.addEventListener("click", () => segyFileInput.click());
-
-demFileInput.addEventListener("change", async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-
-  showLoading(true);
-  try {
-    AppState.demData = await readDEMFile(file);
-    AppState.demFileName = file.name;
-    demFileNameSpan.textContent = file.name;
-    demFileNameSpan.classList.add("loaded");
-    updateStatus(`<strong>DEM文件已加载：</strong>${file.name}<br>尺寸: ${AppState.demData.width} × ${AppState.demData.height}`);
-    console.log("DEM loaded:", AppState.demData);
-  } catch (err) {
-    console.error("读取DEM失败:", err);
-    alert("读取DEM文件失败: " + err.message);
-    AppState.demData = null;
-    demFileNameSpan.textContent = "读取失败";
-  } finally {
-    showLoading(false);
-    updateButtonStates();
-  }
-});
-
-segyFileInput.addEventListener("change", async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-
-  showLoading(true);
-  try {
-    AppState.segyData = await readSEGYFile(file);
-    AppState.segyFileName = file.name;
-    segyFileNameSpan.textContent = file.name;
-    segyFileNameSpan.classList.add("loaded");
-    updateStatus(`<strong>SEGY文件已加载：</strong>${file.name}<br>道数: ${AppState.segyData.traceCount}, 采样点: ${AppState.segyData.sampleCount}`);
-    console.log("SEGY loaded:", AppState.segyData);
-  } catch (err) {
-    console.error("读取SEGY失败:", err);
-    alert("读取SEGY文件失败: " + err.message);
-    AppState.segyData = null;
-    segyFileNameSpan.textContent = "读取失败";
-  } finally {
-    showLoading(false);
-    updateButtonStates();
-  }
-});
-
-// ======================= DEM 文件读取 (使用 GeoTIFF.js) =======================
-async function readDEMFile(file) {
-  const arrayBuffer = await file.arrayBuffer();
-  const tiff = await GeoTIFF.fromArrayBuffer(arrayBuffer);
-  const image = await tiff.getImage();
-  const width = image.getWidth();
-  const height = image.getHeight();
-  const data = await image.readRasters({ interleave: true });
-
-  // 获取第一个波段
-  let values;
-  if (data instanceof Float32Array || data instanceof Float64Array || data instanceof Uint16Array || data instanceof Int16Array) {
-    values = new Float32Array(data);
-  } else if (Array.isArray(data) || data.length) {
-    values = new Float32Array(data[0] || data);
-  } else {
-    values = new Float32Array(width * height);
-  }
-
-  // 处理无效值
-  for (let i = 0; i < values.length; i++) {
-    if (!isFinite(values[i]) || values[i] < -1e10 || values[i] > 1e10) {
-      values[i] = 0;
-    }
-  }
-
-  // 计算范围
-  let min = Infinity, max = -Infinity;
-  for (let i = 0; i < values.length; i++) {
-    if (values[i] < min) min = values[i];
-    if (values[i] > max) max = values[i];
-  }
-
-  return { width, height, data: values, min, max };
-}
-
-// ======================= SEGY 文件读取 (纯 JavaScript 解析) =======================
-async function readSEGYFile(file) {
-  const arrayBuffer = await file.arrayBuffer();
-  const dataView = new DataView(arrayBuffer);
-
-  // 读取文本头 (3200 bytes) - 跳过
-  // 读取二进制头 (400 bytes)
-  const binaryHeaderOffset = 3200;
-
-  // 采样间隔 (bytes 16-17, big-endian)
-  const dt = dataView.getInt16(binaryHeaderOffset + 16, false);
-
-  // 每道采样数 (bytes 20-21, big-endian)
-  const sampleCount = dataView.getInt16(binaryHeaderOffset + 20, false);
-
-  // 数据格式 (bytes 24-25)
-  const formatCode = dataView.getInt16(binaryHeaderOffset + 24, false);
-
-  console.log(`SEGY: dt=${dt}μs, samples=${sampleCount}, format=${formatCode}`);
-
-  // 计算道数
-  const traceHeaderSize = 240;
-  const bytesPerSample = formatCode === 1 ? 4 : (formatCode === 5 ? 4 : 4); // IBM/IEEE float
-  const traceDataSize = sampleCount * bytesPerSample;
-  const traceSize = traceHeaderSize + traceDataSize;
-  const dataStart = 3600;
-  const traceCount = Math.floor((arrayBuffer.byteLength - dataStart) / traceSize);
-
-  console.log(`SEGY: ${traceCount} traces detected`);
-
-  // 读取所有道数据
-  const traces = [];
-  for (let t = 0; t < traceCount; t++) {
-    const traceOffset = dataStart + t * traceSize + traceHeaderSize;
-    const traceData = new Float32Array(sampleCount);
-
-    for (let s = 0; s < sampleCount; s++) {
-      const sampleOffset = traceOffset + s * 4;
-      if (formatCode === 1) {
-        // IBM 浮点格式
-        traceData[s] = ibmToIeee(dataView.getUint32(sampleOffset, false));
-      } else {
-        // IEEE 浮点格式 (大端)
-        traceData[s] = dataView.getFloat32(sampleOffset, false);
-      }
-    }
-    traces.push(traceData);
-  }
-
-  return {
-    traces,
-    traceCount,
-    sampleCount,
-    dt: dt, // 微秒
+  const buttons = {
+    dem: document.getElementById("btnDem"),
+    density: document.getElementById("btnDensity"),
+    wiggle: document.getElementById("btnWiggle"),
+    volume: document.getElementById("btnVolume"),
   };
+
+  // 移除所有 active 类
+  Object.values(buttons).forEach(btn => btn.classList.remove("active"));
+
+  // 给当前激活的按钮添加 active 类
+  if (activeVisualization && buttons[activeVisualization]) {
+    buttons[activeVisualization].classList.add("active");
+  }
 }
 
-// IBM 浮点到 IEEE 浮点转换
-function ibmToIeee(ibm) {
-  if (ibm === 0) return 0;
-
-  const sign = (ibm >>> 31) & 1;
-  const exponent = ((ibm >>> 24) & 0x7f) - 64;
-  const fraction = (ibm & 0x00ffffff) / 16777216.0;
-
-  if (fraction === 0) return 0;
-
-  const value = fraction * Math.pow(16, exponent);
-  return sign ? -value : value;
+function updateAxisInfo(content) {
+  const infoDiv = document.getElementById("axisInfo");
+  if (infoDiv) {
+    infoDiv.innerHTML = content;
+  }
 }
 
-// ======================= 调色盘编辑器 =======================
+// ======================= 可视化切换逻辑 =======================
+function toggleVisualization(type, showFunction) {
+  // 如果点击的是当前激活的类型，则清除
+  if (activeVisualization === type) {
+    clearAllDisplays();
+    activeVisualization = null;
+    updateButtonStates();
+    updateAxisInfo('<div style="text-align:center; color:#9ca3af;">已清除显示</div>');
+    return;
+  }
+
+  // 否则清除当前显示，切换到新类型
+  clearAllDisplays();
+  activeVisualization = type;
+  updateButtonStates();
+  showFunction();
+}
+
+// ======================= 调色盘 =======================
 const MAX_POINTS = 10;
+
 const cmap = {
   points: [
     { x: 0.00, color: "#3b4cc0", a: 0.00 },
@@ -362,13 +244,14 @@ const cmap = {
 const cmapCanvas = document.getElementById("cmapCanvas");
 const cmapCtx = cmapCanvas.getContext("2d");
 
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
 function hexToRgb01(hex) {
   const h = hex.replace("#", "");
-  return [
-    parseInt(h.slice(0, 2), 16) / 255,
-    parseInt(h.slice(2, 4), 16) / 255,
-    parseInt(h.slice(4, 6), 16) / 255
-  ];
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  return [r, g, b];
 }
 
 function rgb01ToHex(r, g, b) {
@@ -439,12 +322,11 @@ function renderCMapEditor() {
   cmapCtx.strokeStyle = "#000";
   cmapCtx.strokeRect(0.5, 10.5, w - 1, colorH - 21);
 
-  // 绘制透明度区域
+  // 透明度区域
   cmapCtx.fillStyle = "#f6f6f6";
   cmapCtx.fillRect(0, alphaY0, w, alphaH);
 
   cmapCtx.strokeStyle = "#ddd";
-  cmapCtx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const yy = alphaY0 + (i / 4) * alphaH;
     cmapCtx.beginPath();
@@ -455,7 +337,7 @@ function renderCMapEditor() {
   cmapCtx.strokeStyle = "#000";
   cmapCtx.strokeRect(0.5, alphaY0 + 0.5, w - 1, alphaH - 1);
 
-  // 绘制透明度曲线
+  // 透明度曲线
   sortPoints();
   cmapCtx.strokeStyle = "#222";
   cmapCtx.lineWidth = 2;
@@ -469,13 +351,13 @@ function renderCMapEditor() {
   }
   cmapCtx.stroke();
 
-  // 绘制控制点
+  // 控制点
   for (let i = 0; i < cmap.points.length; i++) {
     const p = cmap.points[i];
     const px = p.x * (w - 1);
-    const baseY = colorH - 5;
 
     // 颜色条上的三角形
+    const baseY = colorH - 5;
     cmapCtx.fillStyle = p.color;
     cmapCtx.beginPath();
     cmapCtx.moveTo(px, baseY);
@@ -496,7 +378,6 @@ function renderCMapEditor() {
     cmapCtx.stroke();
   }
 
-  // 标签
   cmapCtx.fillStyle = "#000";
   cmapCtx.font = "12px sans-serif";
   cmapCtx.fillText("颜色", 6, 18);
@@ -547,9 +428,7 @@ function addPointAt(x01) {
   }
   cmap.points.push({ x: x01, color: sampleColorAt(x01), a: sampleAlphaAt(x01) });
   sortPoints();
-  for (let i = 0; i < cmap.points.length; i++) {
-    if (Math.abs(cmap.points[i].x - x01) < 1e-6) cmap.selected = i;
-  }
+  cmap.selected = cmap.points.findIndex(p => Math.abs(p.x - x01) < 1e-6);
   renderCMapEditor();
 }
 
@@ -567,11 +446,11 @@ function syncSelectedUI() {
   const p = getSelectedPoint();
   if (!p) return;
   document.getElementById("ptColor").value = p.color;
-  document.getElementById("ptAlpha").value = String(Math.round(clamp(p.a, 0, 1) * 100));
+  document.getElementById("ptAlpha").value = String(Math.round(p.a * 100));
   document.getElementById("ptAlphaText").innerText = p.a.toFixed(2);
 }
 
-// 调色盘事件
+// 调色盘交互
 cmapCanvas.addEventListener("mousedown", (ev) => {
   const rect = cmapCanvas.getBoundingClientRect();
   const mx = ev.clientX - rect.left;
@@ -609,9 +488,7 @@ window.addEventListener("mouseup", () => {
 
 cmapCanvas.addEventListener("dblclick", (ev) => {
   const rect = cmapCanvas.getBoundingClientRect();
-  const mx = ev.clientX - rect.left;
-  const my = ev.clientY - rect.top;
-  const idx = findPointAtCanvasPos(mx, my);
+  const idx = findPointAtCanvasPos(ev.clientX - rect.left, ev.clientY - rect.top);
   if (idx < 0) return;
   cmap.selected = idx;
   syncSelectedUI();
@@ -626,10 +503,7 @@ cmapCanvas.addEventListener("dblclick", (ev) => {
 
 document.getElementById("ptColor").addEventListener("input", (e) => {
   const p = getSelectedPoint();
-  if (p) {
-    p.color = e.target.value;
-    renderCMapEditor();
-  }
+  if (p) { p.color = e.target.value; renderCMapEditor(); }
 });
 
 document.getElementById("ptAlpha").addEventListener("input", (e) => {
@@ -644,7 +518,7 @@ document.getElementById("ptAlpha").addEventListener("input", (e) => {
 document.getElementById("btnAddPoint").onclick = () => addPointAt(0.5);
 document.getElementById("btnDeletePoint").onclick = deleteSelectedPoint;
 
-// ======================= 构建 VTK 颜色/透明度函数 =======================
+// ======================= 构建 VTK 颜色函数 =======================
 function buildVTKCTF(range) {
   const [sMin, sMax] = range;
   const s = (t) => sMin + t * (sMax - sMin);
@@ -668,7 +542,6 @@ function buildVTKOpacity(range) {
   return ofun;
 }
 
-// ======================= 色标 =======================
 function ensureScalarBar(lut) {
   const SBA = vtk.Rendering.Annotation?.vtkScalarBarActor;
   if (!SBA || !lut) return;
@@ -676,12 +549,14 @@ function ensureScalarBar(lut) {
     scalarBarActor = SBA.newInstance();
     scalarBarActor.setAxisLabel("数值");
     scalarBarActor.setDrawNanAnnotation(false);
+    scalarBarActor.setPosition(0.80, 0.05);
+    scalarBarActor.setMaximumWidthInPixels(120);
+    scalarBarActor.setMaximumHeightInPixels(300);
     renderer.addActor2D(scalarBarActor);
   }
   scalarBarActor.setScalarsToColors(lut);
 }
 
-// ======================= 应用调色盘 =======================
 function applyCMapToDEM() {
   if (!demMapper) return;
   const range = demMapper.getScalarRange();
@@ -717,7 +592,7 @@ function applyCMapToAll() {
   applyCMapToDEM();
   applyCMapToSegy2D();
   applyCMapToVolume();
-  scheduleRender();
+  renderWindow.render();
 }
 
 document.getElementById("btnApplyCMap").onclick = applyCMapToAll;
@@ -760,194 +635,60 @@ function setPreset(name) {
 }
 
 document.getElementById("btnApplyPreset").onclick = () => {
-  const name = document.getElementById("lutPreset").value;
-  setPreset(name);
+  setPreset(document.getElementById("lutPreset").value);
   applyCMapToAll();
 };
 
 renderCMapEditor();
 
-// ======================= DEM 曲面构建 =======================
-function buildDEMSurface() {
-  const { width: w, height: h, data: z, min: zmin, max: zmax } = AppState.demData;
-
-  // 降采样以提高性能
-  const decimate = Math.max(1, Math.floor(Math.max(w, h) / 300));
-  const w2 = Math.floor(w / decimate);
-  const h2 = Math.floor(h / decimate);
-
-  // 归一化
-  const scaleXY = 1.0 / Math.max(w2, h2);
-  const dz = (zmax - zmin) || 1;
-  const scaleZ = 0.35 / dz;
-
-  const points = new Float32Array(w2 * h2 * 3);
-  const scalars = new Float32Array(w2 * h2);
-
-  for (let j = 0; j < h2; j++) {
-    for (let i = 0; i < w2; i++) {
-      const srcI = Math.min(i * decimate, w - 1);
-      const srcJ = Math.min(j * decimate, h - 1);
-      const srcIdx = srcJ * w + srcI;
-      const dstIdx = j * w2 + i;
-
-      const zVal = z[srcIdx];
-      points[dstIdx * 3 + 0] = (i - w2 / 2) * scaleXY;
-      points[dstIdx * 3 + 1] = (j - h2 / 2) * scaleXY;
-      points[dstIdx * 3 + 2] = (zVal - zmin) * scaleZ;
-      scalars[dstIdx] = zVal;
-    }
-  }
-
-  // 构建三角形
-  const nCells = (w2 - 1) * (h2 - 1) * 2;
-  const polys = new Uint32Array(nCells * 4);
-  let p = 0;
-
-  for (let j = 0; j < h2 - 1; j++) {
-    for (let i = 0; i < w2 - 1; i++) {
-      const a = j * w2 + i;
-      const b = j * w2 + i + 1;
-      const c = (j + 1) * w2 + i;
-      const d = (j + 1) * w2 + i + 1;
-      polys[p++] = 3; polys[p++] = a; polys[p++] = b; polys[p++] = d;
-      polys[p++] = 3; polys[p++] = a; polys[p++] = d; polys[p++] = c;
-    }
-  }
-
-  const polydata = vtk.Common.DataModel.vtkPolyData.newInstance();
-  polydata.getPoints().setData(points, 3);
-  polydata.getPolys().setData(polys);
-  polydata.getPointData().setScalars(
-    vtk.Common.Core.vtkDataArray.newInstance({
-      name: "elevation",
-      values: scalars,
-      numberOfComponents: 1,
-    })
-  );
-
-  return { polydata, w2, h2, zmin, zmax };
-}
-
-// ======================= 加载 DEM =======================
-async function loadDEM() {
-  if (!AppState.demData) return;
-
-  showLoading(true);
-
-  // 使用 setTimeout 让 UI 有机会更新
-  await new Promise(resolve => setTimeout(resolve, 50));
-
-  try {
-    const { polydata, w2, h2, zmin, zmax } = buildDEMSurface();
-
-    demMapper = vtk.Rendering.Core.vtkMapper.newInstance();
-    demMapper.setInputData(polydata);
-    demMapper.setScalarModeToUsePointData();
-    demMapper.setColorModeToMapScalars();
-    demMapper.setScalarRange(zmin, zmax);
-
-    demActor = vtk.Rendering.Core.vtkActor.newInstance();
-    demActor.setMapper(demMapper);
-
-    const prop = demActor.getProperty();
-    prop.setInterpolationToPhong();
-    prop.setAmbient(0.25);
-    prop.setDiffuse(0.7);
-    prop.setSpecular(0.15);
-    prop.setSpecularPower(25);
-
-    renderer.addActor(demActor);
-    applyCMapToDEM();
-
-    renderer.resetCamera();
-    scheduleRender();
-
-    updateStatus(`<strong>当前模式：</strong>DEM 三维曲面<br>文件：${AppState.demFileName}`);
-    updateAxisInfo(`
-      <strong>DEM 地形数据：</strong><br>
-      原始尺寸: ${AppState.demData.width} × ${AppState.demData.height}<br>
-      显示网格: ${w2} × ${h2}<br>
-      高程范围: ${zmin.toFixed(2)} ~ ${zmax.toFixed(2)}
-    `);
-
-  } catch (e) {
-    console.error("loadDEM failed:", e);
-    alert("加载DEM失败：" + e.message);
-  } finally {
-    showLoading(false);
-  }
-}
-
-// ======================= SEGY 变密度显示 =======================
-async function showDensity() {
-  if (!AppState.segyData) return;
-
-  const start = parseInt(document.getElementById("segyStart").value, 10) || 0;
-  let count = parseInt(document.getElementById("segyCount").value, 10) || 200;
-  count = Math.min(count, AppState.segyData.traceCount - start);
-
-  if (count <= 0) {
-    alert("无效的道范围");
+// ======================= DEM 可视化 =======================
+function showDEM() {
+  if (!demFileData) {
+    alert("请先选择DEM文件");
     return;
   }
 
-  showLoading(true);
-  await new Promise(resolve => setTimeout(resolve, 50));
-
   try {
-    const { traces, sampleCount } = AppState.segyData;
+    // 简单解析 TIFF (假设是单波段灰度图)
+    const arr = new Uint8Array(demFileData);
 
-    // 提取数据子集
-    const data = new Float32Array(count * sampleCount);
-    let dmin = Infinity, dmax = -Infinity;
+    // 尝试找到图像数据（简化处理，实际 TIFF 解析更复杂）
+    // 这里假设是 raw 数据或简单格式
+    const width = 256;  // 假设宽度
+    const height = Math.floor(arr.length / width);
 
-    for (let t = 0; t < count; t++) {
-      const trace = traces[start + t];
-      for (let s = 0; s < sampleCount; s++) {
-        const val = trace[s];
-        data[t * sampleCount + s] = val;
-        if (val < dmin) dmin = val;
-        if (val > dmax) dmax = val;
-      }
+    const z = new Float32Array(width * height);
+    for (let i = 0; i < Math.min(arr.length, z.length); i++) {
+      z[i] = arr[i];
     }
 
     // 归一化
-    const clip = Math.max(Math.abs(dmin), Math.abs(dmax)) + 1e-6;
+    let zmin = Infinity, zmax = -Infinity;
+    for (let i = 0; i < z.length; i++) {
+      if (z[i] < zmin) zmin = z[i];
+      if (z[i] > zmax) zmax = z[i];
+    }
 
-    // 降采样
-    const decim = Math.max(1, Math.floor(Math.max(count, sampleCount) / 400));
-    const W2 = Math.floor(count / decim);
-    const H2 = Math.floor(sampleCount / decim);
-
-    const points = new Float32Array(W2 * H2 * 3);
-    const scalars = new Float32Array(W2 * H2);
-
-    for (let j = 0; j < H2; j++) {
-      for (let i = 0; i < W2; i++) {
-        const srcI = i * decim;
-        const srcJ = j * decim;
-        const dstIdx = j * W2 + i;
-
-        points[dstIdx * 3 + 0] = i / (W2 - 1);
-        points[dstIdx * 3 + 1] = 1 - j / (H2 - 1);
-        points[dstIdx * 3 + 2] = 0;
-
-        const val = data[srcI * sampleCount + srcJ];
-        scalars[dstIdx] = (val + clip) / (2 * clip);
+    const points = new Float32Array(width * height * 3);
+    for (let j = 0; j < height; j++) {
+      for (let i = 0; i < width; i++) {
+        const idx = j * width + i;
+        points[idx * 3 + 0] = i / width - 0.5;
+        points[idx * 3 + 1] = j / height - 0.5;
+        points[idx * 3 + 2] = (z[idx] - zmin) / (zmax - zmin + 1) * 0.3;
       }
     }
 
-    // 构建网格
-    const nCells = (W2 - 1) * (H2 - 1) * 2;
+    // 构建三角网格
+    const nCells = (width - 1) * (height - 1) * 2;
     const polys = new Uint32Array(nCells * 4);
     let p = 0;
-    for (let j = 0; j < H2 - 1; j++) {
-      for (let i = 0; i < W2 - 1; i++) {
-        const a = j * W2 + i;
-        const b = j * W2 + i + 1;
-        const c = (j + 1) * W2 + i;
-        const d = (j + 1) * W2 + i + 1;
+    for (let j = 0; j < height - 1; j++) {
+      for (let i = 0; i < width - 1; i++) {
+        const a = j * width + i;
+        const b = j * width + i + 1;
+        const c = (j + 1) * width + i;
+        const d = (j + 1) * width + i + 1;
         polys[p++] = 3; polys[p++] = a; polys[p++] = b; polys[p++] = d;
         polys[p++] = 3; polys[p++] = a; polys[p++] = d; polys[p++] = c;
       }
@@ -958,8 +699,107 @@ async function showDensity() {
     polydata.getPolys().setData(polys);
     polydata.getPointData().setScalars(
       vtk.Common.Core.vtkDataArray.newInstance({
+        name: "elevation",
+        values: z,
+        numberOfComponents: 1,
+      })
+    );
+
+    demMapper = vtk.Rendering.Core.vtkMapper.newInstance();
+    demMapper.setInputData(polydata);
+    demMapper.setScalarRange(zmin, zmax);
+
+    demActor = vtk.Rendering.Core.vtkActor.newInstance();
+    demActor.setMapper(demMapper);
+
+    const prop = demActor.getProperty();
+    prop.setInterpolationToPhong();
+    prop.setAmbient(0.25);
+    prop.setDiffuse(0.7);
+    prop.setSpecular(0.15);
+
+    renderer.addActor(demActor);
+    applyCMapToDEM();
+
+    renderer.resetCamera();
+    renderWindow.render();
+
+    updateAxisInfo(`
+      <strong>DEM 地形数据：</strong><br>
+      网格尺寸: ${width} × ${height}<br>
+      高程范围: ${zmin.toFixed(2)} ~ ${zmax.toFixed(2)}
+    `);
+
+    console.log("DEM显示成功");
+  } catch (e) {
+    console.error("DEM显示失败:", e);
+    alert("DEM显示失败: " + e.message);
+  }
+}
+
+// ======================= SEGY 变密度 =======================
+function showDensity() {
+  if (!segyFileData || !segyInfo) {
+    alert("请先选择SEGY文件");
+    return;
+  }
+
+  const start = parseInt(document.getElementById("segyStart").value, 10) || 0;
+  const count = parseInt(document.getElementById("segyCount").value, 10) || 200;
+
+  try {
+    const result = getSegyTraces(segyFileData, start, count);
+    if (!result) throw new Error("无法读取道数据");
+
+    const { data, traceCount, sampleCount } = result;
+
+    // 归一化
+    let dmin = Infinity, dmax = -Infinity;
+    for (let i = 0; i < data.length; i++) {
+      if (isFinite(data[i])) {
+        if (data[i] < dmin) dmin = data[i];
+        if (data[i] > dmax) dmax = data[i];
+      }
+    }
+
+    const normalized = new Float32Array(data.length);
+    const range = dmax - dmin || 1;
+    for (let i = 0; i < data.length; i++) {
+      normalized[i] = (data[i] - dmin) / range;
+    }
+
+    // 构建网格
+    const points = new Float32Array(traceCount * sampleCount * 3);
+    for (let t = 0; t < traceCount; t++) {
+      for (let s = 0; s < sampleCount; s++) {
+        const idx = t * sampleCount + s;
+        points[idx * 3 + 0] = t / traceCount;
+        points[idx * 3 + 1] = 1 - s / sampleCount;
+        points[idx * 3 + 2] = 0;
+      }
+    }
+
+    const nCells = (traceCount - 1) * (sampleCount - 1) * 2;
+    const polys = new Uint32Array(nCells * 4);
+    let p = 0;
+    for (let t = 0; t < traceCount - 1; t++) {
+      for (let s = 0; s < sampleCount - 1; s++) {
+        const a = t * sampleCount + s;
+        const b = t * sampleCount + s + 1;
+        const c = (t + 1) * sampleCount + s;
+        const d = (t + 1) * sampleCount + s + 1;
+        polys[p++] = 3; polys[p++] = a; polys[p++] = c; polys[p++] = d;
+        polys[p++] = 3; polys[p++] = a; polys[p++] = d; polys[p++] = b;
+      }
+    }
+
+    const polydata = vtk.Common.DataModel.vtkPolyData.newInstance();
+    polydata.getPoints().setData(points, 3);
+    polydata.getPolys().setData(polys);
+    polydata.getPointData().setScalars(
+      vtk.Common.Core.vtkDataArray.newInstance({
         name: "amplitude",
-        values: scalars,
+        values: normalized,
         numberOfComponents: 1,
       })
     );
@@ -968,93 +808,59 @@ async function showDensity() {
     segy2DMapper.setInputData(polydata);
     segy2DMapper.setScalarRange(0, 1);
 
-    const ctf = buildVTKCTF([0, 1]);
-    segy2DMapper.setLookupTable(ctf);
-
     segy2DActor = vtk.Rendering.Core.vtkActor.newInstance();
     segy2DActor.setMapper(segy2DMapper);
-    renderer.addActor(segy2DActor);
 
-    // 添加边框
-    addBorder();
+    renderer.addActor(segy2DActor);
+    applyCMapToSegy2D();
 
     setCameraPreset("front");
 
-    const dtMs = AppState.segyData.dt / 1000;
-    updateStatus(`<strong>当前模式：</strong>变密度显示<br>文件：${AppState.segyFileName}`);
+    const dtMs = segyInfo.dtMicroseconds / 1000;
     updateAxisInfo(`
       <strong>变密度显示：</strong><br>
-      道范围: ${start} - ${start + count - 1}<br>
-      采样点: ${sampleCount}<br>
-      时间范围: 0 - ${(sampleCount * dtMs).toFixed(1)} ms
+      道号范围: ${start} - ${start + traceCount - 1}<br>
+      时间范围: 0 - ${(sampleCount * dtMs).toFixed(1)} ms<br>
+      采样点数: ${sampleCount}
     `);
 
+    console.log("变密度显示成功:", { traceCount, sampleCount });
   } catch (e) {
-    console.error("showDensity failed:", e);
-    alert("变密度显示失败：" + e.message);
-  } finally {
-    showLoading(false);
+    console.error("变密度显示失败:", e);
+    alert("变密度显示失败: " + e.message);
   }
 }
 
-// ======================= 添加边框 =======================
-function addBorder() {
-  const borderPoints = new Float32Array([
-    0, 0, 0.001,  1, 0, 0.001,  1, 1, 0.001,  0, 1, 0.001,  0, 0, 0.001
-  ]);
-  const borderLines = new Uint32Array([5, 0, 1, 2, 3, 4]);
-
-  const borderPolydata = vtk.Common.DataModel.vtkPolyData.newInstance();
-  borderPolydata.getPoints().setData(borderPoints, 3);
-  borderPolydata.getLines().setData(borderLines);
-
-  const borderMapper = vtk.Rendering.Core.vtkMapper.newInstance();
-  borderMapper.setInputData(borderPolydata);
-
-  const borderActor = vtk.Rendering.Core.vtkActor.newInstance();
-  borderActor.setMapper(borderMapper);
-  borderActor.getProperty().setColor(1, 1, 1);
-  borderActor.getProperty().setLineWidth(2);
-
-  segy2DWiggleActors.push(borderActor);
-  renderer.addActor(borderActor);
-}
-
-// ======================= SEGY 变面积显示 =======================
-async function showWiggle() {
-  if (!AppState.segyData) return;
-
-  const start = parseInt(document.getElementById("segyStart").value, 10) || 0;
-  let count = parseInt(document.getElementById("segyCount").value, 10) || 50;
-  count = Math.min(count, 100, AppState.segyData.traceCount - start);
-
-  if (count <= 0) {
-    alert("无效的道范围");
+// ======================= SEGY 变面积 =======================
+function showWiggle() {
+  if (!segyFileData || !segyInfo) {
+    alert("请先选择SEGY文件");
     return;
   }
 
-  showLoading(true);
-  await new Promise(resolve => setTimeout(resolve, 50));
+  const start = parseInt(document.getElementById("segyStart").value, 10) || 0;
+  let count = parseInt(document.getElementById("segyCount").value, 10) || 60;
+  count = Math.min(count, 80); // 限制道数避免卡顿
 
   try {
-    const { traces, sampleCount } = AppState.segyData;
+    const result = getSegyTraces(segyFileData, start, count);
+    if (!result) throw new Error("无法读取道数据");
 
-    // 计算归一化因子
+    const { data, traceCount, sampleCount } = result;
+
+    // 归一化
     let maxAbs = 0;
-    for (let t = 0; t < count; t++) {
-      const trace = traces[start + t];
-      for (let s = 0; s < sampleCount; s++) {
-        const v = Math.abs(trace[s]);
-        if (v > maxAbs) maxAbs = v;
+    for (let i = 0; i < data.length; i++) {
+      if (isFinite(data[i]) && Math.abs(data[i]) > maxAbs) {
+        maxAbs = Math.abs(data[i]);
       }
     }
     maxAbs = maxAbs || 1;
 
-    const scale = 0.7 / count;
-    const step = Math.max(1, Math.floor(sampleCount / 500));
+    const scale = 0.7;
 
-    // 白色背景
-    const bgPoints = new Float32Array([0, 0, -0.002, 1, 0, -0.002, 1, 1, -0.002, 0, 1, -0.002]);
+    // 添加白色背景
+    const bgPoints = new Float32Array([0, 0, -0.001, 1, 0, -0.001, 1, 1, -0.001, 0, 1, -0.001]);
     const bgPolys = new Uint32Array([4, 0, 1, 2, 3]);
     const bgPolydata = vtk.Common.DataModel.vtkPolyData.newInstance();
     bgPolydata.getPoints().setData(bgPoints, 3);
@@ -1067,169 +873,141 @@ async function showWiggle() {
     segy2DFillActors.push(bgActor);
     renderer.addActor(bgActor);
 
-    // 绘制每条道
-    for (let t = 0; t < count; t++) {
-      const trace = traces[start + t];
-      const baseX = (t + 0.5) / count;
-
-      // 波形线
-      const linePts = [];
-      for (let s = 0; s < sampleCount; s += step) {
-        const val = trace[s] / maxAbs;
-        const x = baseX + val * scale;
-        const y = 1 - s / sampleCount;
-        linePts.push(x, y, 0.001);
-      }
-
-      const linePoints = new Float32Array(linePts);
-      const nPts = linePts.length / 3;
-      const lines = new Uint32Array(nPts + 1);
-      lines[0] = nPts;
-      for (let k = 0; k < nPts; k++) lines[k + 1] = k;
-
-      const linePolydata = vtk.Common.DataModel.vtkPolyData.newInstance();
-      linePolydata.getPoints().setData(linePoints, 3);
-      linePolydata.getLines().setData(lines);
-
-      const lineMapper = vtk.Rendering.Core.vtkMapper.newInstance();
-      lineMapper.setInputData(linePolydata);
-
-      const lineActor = vtk.Rendering.Core.vtkActor.newInstance();
-      lineActor.setMapper(lineMapper);
-      lineActor.getProperty().setColor(0, 0, 0);
-      lineActor.getProperty().setLineWidth(1);
-
-      segy2DWiggleActors.push(lineActor);
-      renderer.addActor(lineActor);
-
-      // 正半波填充
-      const fillPts = [];
+    // 为每条道创建折线和填充
+    for (let t = 0; t < traceCount; t++) {
+      const baseX = t / traceCount;
+      const linePoints = [];
+      const fillPoints = [];
       const fillPolys = [];
-      let fillIdx = 0;
 
-      for (let s = 0; s < sampleCount - step; s += step) {
-        const val0 = trace[s] / maxAbs;
-        const val1 = trace[s + step] / maxAbs;
+      for (let s = 0; s < sampleCount; s++) {
+        const amp = data[t * sampleCount + s] / maxAbs * scale / traceCount;
+        const x = baseX + amp;
+        const y = 1 - s / sampleCount;
 
-        if (val0 > 0 || val1 > 0) {
-          const x0 = baseX + Math.max(0, val0) * scale;
-          const x1 = baseX + Math.max(0, val1) * scale;
-          const y0 = 1 - s / sampleCount;
-          const y1 = 1 - (s + step) / sampleCount;
+        linePoints.push(x, y, 0.001);
 
-          fillPts.push(baseX, y0, 0);
-          fillPts.push(x0, y0, 0);
-          fillPts.push(x1, y1, 0);
-          fillPts.push(baseX, y1, 0);
+        // 正半波填充
+        if (amp > 0 && s > 0) {
+          const prevAmp = data[t * sampleCount + s - 1] / maxAbs * scale / traceCount;
+          const prevX = baseX + prevAmp;
+          const prevY = 1 - (s - 1) / sampleCount;
 
-          fillPolys.push(4, fillIdx, fillIdx + 1, fillIdx + 2, fillIdx + 3);
-          fillIdx += 4;
+          const idx = fillPoints.length / 3;
+          fillPoints.push(baseX, prevY, 0);
+          fillPoints.push(Math.max(prevX, baseX), prevY, 0);
+          fillPoints.push(Math.max(x, baseX), y, 0);
+          fillPoints.push(baseX, y, 0);
+          fillPolys.push(4, idx, idx + 1, idx + 2, idx + 3);
         }
       }
 
-      if (fillPts.length > 0) {
-        const fillPolydata = vtk.Common.DataModel.vtkPolyData.newInstance();
-        fillPolydata.getPoints().setData(new Float32Array(fillPts), 3);
-        fillPolydata.getPolys().setData(new Uint32Array(fillPolys));
+      // 创建折线
+      if (linePoints.length > 0) {
+        const lp = vtk.Common.DataModel.vtkPolyData.newInstance();
+        lp.getPoints().setData(new Float32Array(linePoints), 3);
+        const lines = new Uint32Array(linePoints.length / 3 + 1);
+        lines[0] = linePoints.length / 3;
+        for (let i = 0; i < linePoints.length / 3; i++) lines[i + 1] = i;
+        lp.getLines().setData(lines);
 
-        const fillMapper = vtk.Rendering.Core.vtkMapper.newInstance();
-        fillMapper.setInputData(fillPolydata);
+        const lm = vtk.Rendering.Core.vtkMapper.newInstance();
+        lm.setInputData(lp);
+        const la = vtk.Rendering.Core.vtkActor.newInstance();
+        la.setMapper(lm);
+        la.getProperty().setColor(0, 0, 0);
+        la.getProperty().setLineWidth(1);
+        segy2DWiggleActors.push(la);
+        renderer.addActor(la);
+      }
 
-        const fillActor = vtk.Rendering.Core.vtkActor.newInstance();
-        fillActor.setMapper(fillMapper);
-        fillActor.getProperty().setColor(0, 0, 0);
+      // 创建填充
+      if (fillPoints.length > 0) {
+        const fp = vtk.Common.DataModel.vtkPolyData.newInstance();
+        fp.getPoints().setData(new Float32Array(fillPoints), 3);
+        fp.getPolys().setData(new Uint32Array(fillPolys));
 
-        segy2DFillActors.push(fillActor);
-        renderer.addActor(fillActor);
+        const fm = vtk.Rendering.Core.vtkMapper.newInstance();
+        fm.setInputData(fp);
+        const fa = vtk.Rendering.Core.vtkActor.newInstance();
+        fa.setMapper(fm);
+        fa.getProperty().setColor(0, 0, 0);
+        segy2DFillActors.push(fa);
+        renderer.addActor(fa);
       }
     }
 
-    addBorder();
     setCameraPreset("front");
 
-    const dtMs = AppState.segyData.dt / 1000;
-    updateStatus(`<strong>当前模式：</strong>变面积显示<br>文件：${AppState.segyFileName}`);
+    const dtMs = segyInfo.dtMicroseconds / 1000;
     updateAxisInfo(`
       <strong>变面积显示：</strong><br>
-      道范围: ${start} - ${start + count - 1}<br>
-      采样点: ${sampleCount}<br>
-      时间范围: 0 - ${(sampleCount * dtMs).toFixed(1)} ms
+      道号范围: ${start} - ${start + traceCount - 1}<br>
+      时间范围: 0 - ${(sampleCount * dtMs).toFixed(1)} ms<br>
+      采样点数: ${sampleCount}
     `);
 
+    console.log("变面积显示成功:", { traceCount, sampleCount });
   } catch (e) {
-    console.error("showWiggle failed:", e);
-    alert("变面积显示失败：" + e.message);
-  } finally {
-    showLoading(false);
+    console.error("变面积显示失败:", e);
+    alert("变面积显示失败: " + e.message);
   }
 }
 
 // ======================= SEGY 体渲染 =======================
-async function showVolume() {
-  if (!AppState.segyData) return;
-
-  const start = parseInt(document.getElementById("segyStart").value, 10) || 0;
-  let count = parseInt(document.getElementById("segyCount").value, 10) || 100;
-  count = Math.min(count, AppState.segyData.traceCount - start);
-
-  if (count <= 0) {
-    alert("无效的道范围");
+function showVolume() {
+  if (!segyFileData || !segyInfo) {
+    alert("请先选择SEGY文件");
     return;
   }
 
-  showLoading(true);
-  await new Promise(resolve => setTimeout(resolve, 50));
+  const start = parseInt(document.getElementById("segyStart").value, 10) || 0;
+  const count = parseInt(document.getElementById("segyCount").value, 10) || 128;
+  const slices = 32;
+  const stride = 20;
 
   try {
-    const { traces, sampleCount } = AppState.segyData;
+    const { sampleCount, traceCount: totalTraces } = segyInfo;
 
-    // 构建 3D 体：使用多个切片
-    const slices = 32;
-    const stride = Math.max(1, Math.floor(count / slices));
-    const sampleDecim = 2;
+    // 构建体数据
+    const nx = Math.min(count, totalTraces - start);
+    const ny = sampleCount;
+    const nz = slices;
 
-    const nx = Math.min(count, 128);
-    const ny = Math.floor(sampleCount / sampleDecim);
-    const nz = Math.min(slices, Math.floor(count / stride));
-
-    const volume = new Float32Array(nx * ny * nz);
-    let vmin = Infinity, vmax = -Infinity;
+    const vol = new Float32Array(nx * ny * nz);
 
     for (let z = 0; z < nz; z++) {
-      const traceStart = start + z * stride;
-      for (let x = 0; x < nx; x++) {
-        const traceIdx = Math.min(traceStart + x, AppState.segyData.traceCount - 1);
-        const trace = traces[traceIdx];
-        for (let y = 0; y < ny; y++) {
-          const sampleIdx = y * sampleDecim;
-          const val = trace[sampleIdx] || 0;
-          const idx = z * nx * ny + y * nx + x;
-          volume[idx] = val;
-          if (val < vmin) vmin = val;
-          if (val > vmax) vmax = val;
+      const sliceStart = start + z * stride;
+      const result = getSegyTraces(segyFileData, sliceStart, nx);
+      if (result) {
+        for (let x = 0; x < result.traceCount; x++) {
+          for (let y = 0; y < result.sampleCount; y++) {
+            vol[z * nx * ny + y * nx + x] = result.data[x * result.sampleCount + y];
+          }
         }
       }
     }
 
-    // 裁剪极值
-    const clip = Math.max(Math.abs(vmin), Math.abs(vmax)) * 0.99 + 1e-6;
-    for (let i = 0; i < volume.length; i++) {
-      volume[i] = clamp(volume[i], -clip, clip);
+    // 归一化
+    let vmin = Infinity, vmax = -Infinity;
+    for (let i = 0; i < vol.length; i++) {
+      if (isFinite(vol[i])) {
+        if (vol[i] < vmin) vmin = vol[i];
+        if (vol[i] > vmax) vmax = vol[i];
+      }
     }
-    vmin = -clip;
-    vmax = clip;
     volumeScalarRange = [vmin, vmax];
 
     const imageData = vtk.Common.DataModel.vtkImageData.newInstance();
     imageData.setDimensions([nx, ny, nz]);
     imageData.setSpacing([1, 1, 1]);
-
-    const scalars = vtk.Common.Core.vtkDataArray.newInstance({
-      name: "amplitude",
-      values: volume,
-      numberOfComponents: 1,
-    });
-    imageData.getPointData().setScalars(scalars);
+    imageData.getPointData().setScalars(
+      vtk.Common.Core.vtkDataArray.newInstance({
+        name: "amplitude",
+        values: vol,
+        numberOfComponents: 1,
+      })
+    );
 
     volumeMapper = vtk.Rendering.Core.vtkVolumeMapper.newInstance();
     volumeMapper.setInputData(imageData);
@@ -1244,22 +1022,21 @@ async function showVolume() {
     else renderer.addViewProp(volumeActor);
 
     renderer.resetCamera();
-    scheduleRender();
+    renderWindow.render();
 
-    const dtMs = AppState.segyData.dt / 1000;
-    updateStatus(`<strong>当前模式：</strong>体渲染<br>文件：${AppState.segyFileName}`);
+    const dtMs = segyInfo.dtMicroseconds / 1000;
     updateAxisInfo(`
-      <strong>体渲染：</strong><br>
-      体积尺寸: ${nx} × ${ny} × ${nz}<br>
-      道范围: ${start} - ${start + count - 1}<br>
+      <strong>体渲染显示：</strong><br>
+      道号范围: ${start} - ${start + nx - 1}<br>
+      时间范围: 0 - ${(ny * dtMs).toFixed(1)} ms<br>
+      切片数: ${nz}<br>
       振幅范围: ${vmin.toFixed(2)} ~ ${vmax.toFixed(2)}
     `);
 
+    console.log("体渲染显示成功:", { nx, ny, nz, vmin, vmax });
   } catch (e) {
-    console.error("showVolume failed:", e);
-    alert("体渲染失败：" + e.message);
-  } finally {
-    showLoading(false);
+    console.error("体渲染显示失败:", e);
+    alert("体渲染显示失败: " + e.message);
   }
 }
 
@@ -1268,62 +1045,43 @@ function setCameraPreset(name) {
   const cam = renderer.getActiveCamera();
   switch (name) {
     case "top":
-      cam.setPosition(0.5, 0.5, 3);
+      cam.setPosition(0, 0, 2);
       cam.setViewUp(0, 1, 0);
-      cam.setFocalPoint(0.5, 0.5, 0);
       break;
     case "front":
-      cam.setPosition(0.5, -2, 0.5);
-      cam.setViewUp(0, 0, 1);
-      cam.setFocalPoint(0.5, 0.5, 0);
+      cam.setPosition(0.5, 0.5, 2);
+      cam.setViewUp(0, 1, 0);
       break;
     case "side":
-      cam.setPosition(3, 0.5, 0.5);
-      cam.setViewUp(0, 0, 1);
-      cam.setFocalPoint(0.5, 0.5, 0);
+      cam.setPosition(2, 0.5, 0.5);
+      cam.setViewUp(0, 1, 0);
       break;
     default: // iso
-      cam.setPosition(1.5, -1.5, 1.5);
-      cam.setViewUp(0, 0, 1);
-      cam.setFocalPoint(0.5, 0.5, 0);
+      cam.setPosition(1.2, -0.5, 1.5);
+      cam.setViewUp(0, 1, 0);
   }
+  cam.setFocalPoint(0.5, 0.5, 0);
   renderer.resetCamera();
-  scheduleRender();
+  renderWindow.render();
 }
 
-// ======================= 可视化按钮事件 =======================
-Object.entries(vizButtons).forEach(([mode, btn]) => {
-  btn.addEventListener("click", async () => {
-    const wasActive = AppState.currentMode === mode;
-    setCurrentMode(mode);
+// ======================= 按钮事件绑定 =======================
+document.getElementById("btnDem").onclick = () => toggleVisualization("dem", showDEM);
+document.getElementById("btnDensity").onclick = () => toggleVisualization("density", showDensity);
+document.getElementById("btnWiggle").onclick = () => toggleVisualization("wiggle", showWiggle);
+document.getElementById("btnVolume").onclick = () => toggleVisualization("volume", showVolume);
 
-    if (!wasActive && AppState.currentMode === mode) {
-      switch (mode) {
-        case "dem": await loadDEM(); break;
-        case "density": await showDensity(); break;
-        case "wiggle": await showWiggle(); break;
-        case "volume": await showVolume(); break;
-      }
-    }
-    updateButtonStates();
-  });
-});
-
-// ======================= 视角按钮事件 =======================
 document.getElementById("btnViewIso").onclick = () => setCameraPreset("iso");
 document.getElementById("btnViewTop").onclick = () => setCameraPreset("top");
 document.getElementById("btnViewFront").onclick = () => setCameraPreset("front");
 document.getElementById("btnViewSide").onclick = () => setCameraPreset("side");
 document.getElementById("btnResetCam").onclick = () => {
   renderer.resetCamera();
-  scheduleRender();
+  renderWindow.render();
 };
 
 // ======================= 初始化 =======================
-renderer.getActiveCamera().setPosition(1.2, -1.6, 1.0);
-renderer.getActiveCamera().setViewUp(0, 0, 1);
+renderer.getActiveCamera().setPosition(1.2, -0.5, 1.5);
+renderer.getActiveCamera().setViewUp(0, 1, 0);
 renderer.resetCamera();
-scheduleRender();
-updateButtonStates();
-
-console.log("地学数据三维可视化系统已初始化");
+renderWindow.render();

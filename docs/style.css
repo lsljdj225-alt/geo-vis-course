@@ -413,3 +413,46 @@ input[type=range].styled-slider::-webkit-slider-thumb:hover { transform: scale(1
 ::-webkit-scrollbar-thumb:hover {
   background: #9ca3af;
 }
+/* 文件选择按钮 */
+.file-btn {
+  display: inline-block;
+  padding: 6px 12px;
+  background-color: #10b981;
+  color: white;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.file-btn:hover {
+  background-color: #059669;
+  transform: translateY(-1px);
+}
+
+/* 可视化按钮样式 */
+.vis-btn {
+  background-color: #374151;
+}
+
+.vis-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.vis-btn.active {
+  background-color: #2563eb;
+  box-shadow: 0 0 0 2px #93c5fd;
+}
+
+/* 文件状态 */
+#fileStatus {
+  font-size: 13px;
+  line-height: 1.8;
+}
+
+#demFileName, #segyFileName {
+  color: #10b981;
+  font-weight: 500;
+}
