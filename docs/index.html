@@ -5,18 +5,41 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>地学数据三维可视化系统</title>
   <link rel="stylesheet" href="./style.css" />
-  <script src="https://unpkg.com/vtk.js"></script>
+  <!-- vtk.js -->
+  <script src="https://unpkg.com/vtk.js@29.5.2/vtk.js"></script>
+  <!-- geotiff.js 用于读取 DEM.tif -->
+  <script src="https://unpkg.com/geotiff@2.1.3/dist-browser/geotiff.js"></script>
 </head>
 
 <body>
   <!-- 顶部导航工具栏 -->
   <div id="toolbar">
-    <!-- 组1：数据加载 -->
+    <!-- 组1：文件选择 -->
     <div class="tool-group">
-      <button id="btnDem" class="primary-btn">加载地形(DEM)</button>
+      <label class="file-label">
+        <input type="file" id="demFileInput" accept=".tif,.tiff" style="display:none;">
+        <button id="btnSelectDem" class="file-btn">📁 选择DEM文件</button>
+      </label>
+      <span id="demFileName" class="file-name">未选择</span>
     </div>
 
-    <!-- 组2：色带预设 -->
+    <div class="tool-group">
+      <label class="file-label">
+        <input type="file" id="segyFileInput" accept=".sgy,.segy" style="display:none;">
+        <button id="btnSelectSegy" class="file-btn">📁 选择SEGY文件</button>
+      </label>
+      <span id="segyFileName" class="file-name">未选择</span>
+    </div>
+
+    <!-- 组2：可视化按钮（互斥） -->
+    <div class="tool-group">
+      <button id="btnDem" class="viz-btn" data-mode="dem" disabled>加载地形(DEM)</button>
+      <button id="btnDensity" class="viz-btn" data-mode="density" disabled>变密度</button>
+      <button id="btnWiggle" class="viz-btn" data-mode="wiggle" disabled>变面积</button>
+      <button id="btnVolume" class="viz-btn" data-mode="volume" disabled>体渲染</button>
+    </div>
+
+    <!-- 组3：色带预设 -->
     <div class="tool-group">
       <label>色带:
         <select id="lutPreset" title="选择预设颜色方案">
@@ -30,7 +53,7 @@
       <button id="btnApplyPreset">应用</button>
     </div>
 
-    <!-- 组3：视角控制 -->
+    <!-- 组4：视角控制 -->
     <div class="tool-group">
       <button id="btnViewIso" title="标准三维视角">三维</button>
       <button id="btnViewTop" title="从上往下看">俯视</button>
@@ -39,20 +62,21 @@
       <button id="btnResetCam" title="重置相机位置">重置</button>
     </div>
 
-    <!-- 组4：SEGY参数 -->
-    <div class="tool-group">
-      <label>地震数据:
-        <input id="segyStart" type="number" value="0" placeholder="起始" style="width:70px;" title="起始道号 (Start Trace)">
-        <input id="segyCount" type="number" value="200" placeholder="道数" style="width:70px;" title="读取道数 (Count)">
+    <!-- 组5：SEGY参数 -->
+    <div class="tool-group" style="border:none;">
+      <label>起始道:
+        <input id="segyStart" type="number" value="0" style="width:70px;" title="起始道号">
+      </label>
+      <label>道数:
+        <input id="segyCount" type="number" value="200" style="width:70px;" title="读取道数">
       </label>
     </div>
+  </div>
 
-    <!-- 组5：SEGY功能 -->
-    <div class="tool-group" style="border:none;">
-      <button id="btnDensity" class="primary-btn">变密度</button>
-      <button id="btnWiggle" class="primary-btn">变面积</button>
-      <button id="btnVolume" class="primary-btn">体渲染</button>
-    </div>
+  <!-- 加载提示 -->
+  <div id="loadingOverlay" class="hidden">
+    <div class="loading-spinner"></div>
+    <div class="loading-text">正在处理数据...</div>
   </div>
 
   <!-- 主内容区 -->
@@ -67,13 +91,9 @@
       <div class="panel-card">
         <h3>交互式调色盘</h3>
         <div class="info-text">
-          <p>拖拽调整位置，上下拖动调整透明度。</p>
+          <p>点击添加控制点，拖拽调整位置，上下拖动调整透明度。</p>
         </div>
-
-        <!-- Canvas -->
         <canvas id="cmapCanvas" width="380" height="200"></canvas>
-
-        <!-- 按钮行 -->
         <div class="control-row">
           <button id="btnAddPoint" class="icon-btn">
             <span>+</span> 添加点
@@ -82,48 +102,55 @@
             <span>×</span> 删除点
           </button>
         </div>
-
-        <!-- 属性编辑行 -->
         <div class="prop-editor">
           <div class="color-wrapper">
             <span>颜色</span>
             <input id="ptColor" type="color" class="circle-input" value="#ffffff" title="修改选中点颜色">
           </div>
-
           <div class="color-wrapper">
             <span>透明度</span>
             <input id="ptAlpha" type="range" class="styled-slider" min="0" max="100" value="20" title="修改透明度">
             <span id="ptAlphaText" style="font-family:monospace; width:30px;">0.20</span>
           </div>
         </div>
-
         <button id="btnApplyCMap" class="action-btn" style="margin-top:15px;">应用调色盘</button>
       </div>
 
-      <!-- 卡片2：坐标信息 -->
+      <!-- 卡片2：当前状态 -->
       <div class="panel-card">
-        <h3>当前数据信息</h3>
-        <div id="axisInfo" class="status-box">
+        <h3>当前状态</h3>
+        <div id="currentMode" class="status-box">
           <div style="text-align:center; color:#9ca3af;">
-            暂无数据，请点击上方按钮加载
+            请先选择数据文件，然后点击可视化按钮
           </div>
         </div>
       </div>
 
-      <!-- 卡片3：操作指南 -->
+      <!-- 卡片3：数据信息 -->
+      <div class="panel-card">
+        <h3>数据信息</h3>
+        <div id="axisInfo" class="status-box">
+          <div style="text-align:center; color:#9ca3af;">
+            暂无数据
+          </div>
+        </div>
+      </div>
+
+      <!-- 卡片4：操作指南 -->
       <div class="panel-card">
         <h3>操作指南</h3>
         <div class="info-text">
           <ul>
+            <li><strong>选择文件</strong>：点击"选择DEM/SEGY文件"按钮</li>
+            <li><strong>切换显示</strong>：点击可视化按钮显示，再点击清除</li>
             <li><strong>旋转</strong>：鼠标左键拖拽</li>
-            <li><strong>平移</strong>：Shift + 左键 或 鼠标中键拖拽</li>
+            <li><strong>平移</strong>：Shift + 左键 或 中键拖拽</li>
             <li><strong>缩放</strong>：鼠标滚轮</li>
-            <li><strong>切换</strong>：点击顶部按钮切换不同数据的显示</li>
           </ul>
         </div>
       </div>
 
-      <!-- 卡片4：可视化模式对比 -->
+      <!-- 卡片5：可视化模式对比 -->
       <div class="panel-card">
         <h3>可视化模式对比</h3>
         <div class="info-text">
