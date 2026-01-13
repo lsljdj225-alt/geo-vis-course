@@ -642,53 +642,97 @@ document.getElementById("btnApplyPreset").onclick = () => {
 renderCMapEditor();
 
 // ======================= DEM 可视化 =======================
-function showDEM() {
+// ======================= DEM 可视化 (修复版) =======================
+async function showDEM() {
   if (!demFileData) {
     alert("请先选择DEM文件");
     return;
   }
 
   try {
-    // 简单解析 TIFF (假设是单波段灰度图)
-    const arr = new Uint8Array(demFileData);
+    // 1. 使用 GeoTIFF 解析数据
+    const tiff = await GeoTIFF.fromArrayBuffer(demFileData);
+    const image = await tiff.getImage();
+    const rawWidth = image.getWidth();
+    const rawHeight = image.getHeight();
+    const rasters = await image.readRasters();
+    const data = rasters[0]; // 获取第一个波段的高程数据
 
-    // 尝试找到图像数据（简化处理，实际 TIFF 解析更复杂）
-    // 这里假设是 raw 数据或简单格式
-    const width = 256;  // 假设宽度
-    const height = Math.floor(arr.length / width);
+    console.log(`原始DEM尺寸: ${rawWidth} x ${rawHeight}`);
 
-    const z = new Float32Array(width * height);
-    for (let i = 0; i < Math.min(arr.length, z.length); i++) {
-      z[i] = arr[i];
-    }
+    // 2. 智能降采样 (目标网格大小约 300x300，太大浏览器会卡)
+    const TARGET_SIZE = 300;
+    const stepX = Math.max(1, Math.floor(rawWidth / TARGET_SIZE));
+    const stepY = Math.max(1, Math.floor(rawHeight / TARGET_SIZE));
 
-    // 归一化
+    const w = Math.floor(rawWidth / stepX);
+    const h = Math.floor(rawHeight / stepY);
+
+    console.log(`降采样后网格尺寸: ${w} x ${h} (Step: ${stepX}, ${stepY})`);
+
+    // 3. 提取数据并计算极值
+    const z = new Float32Array(w * h);
     let zmin = Infinity, zmax = -Infinity;
-    for (let i = 0; i < z.length; i++) {
-      if (z[i] < zmin) zmin = z[i];
-      if (z[i] > zmax) zmax = z[i];
+
+    // 预处理：先找大概的有效范围，排除异常值(如 -9999)
+    // 简单的百分位过滤或阈值过滤
+    const validValues = [];
+    for (let j = 0; j < h; j += 2) { // 抽样统计
+      for (let i = 0; i < w; i += 2) {
+        const val = data[(j * stepY) * rawWidth + (i * stepX)];
+        if (val > -500 && val < 9000) { // 假设地球高程在 -500 到 9000 米之间
+          validValues.push(val);
+        }
+      }
+    }
+    // 简单的最大最小值
+    if (validValues.length > 0) {
+      zmin = Math.min(...validValues);
+      zmax = Math.max(...validValues);
+    } else {
+      zmin = 0; zmax = 100;
     }
 
-    const points = new Float32Array(width * height * 3);
-    for (let j = 0; j < height; j++) {
-      for (let i = 0; i < width; i++) {
-        const idx = j * width + i;
-        points[idx * 3 + 0] = i / width - 0.5;
-        points[idx * 3 + 1] = j / height - 0.5;
-        points[idx * 3 + 2] = (z[idx] - zmin) / (zmax - zmin + 1) * 0.3;
+    // 填充网格数据
+    for (let j = 0; j < h; j++) {
+      for (let i = 0; i < w; i++) {
+        let val = data[(j * stepY) * rawWidth + (i * stepX)];
+
+        // 异常值处理：如果超出范围，就用最近的有效值或 clamp
+        if (val < zmin) val = zmin;
+        if (val > zmax) val = zmax;
+
+        z[j * w + i] = val;
       }
     }
 
-    // 构建三角网格
-    const nCells = (width - 1) * (height - 1) * 2;
+    // 4. 构建 VTK PolyData
+    const points = new Float32Array(w * h * 3);
+    const zRange = zmax - zmin || 1;
+    const Z_SCALE = 0.3; // Z轴缩放系数，让山看起来不那么平也不那么尖
+
+    for (let j = 0; j < h; j++) {
+      for (let i = 0; i < w; i++) {
+        const idx = j * w + i;
+        // X, Y 归一化到 -0.5 ~ 0.5 居中
+        points[idx * 3 + 0] = (i / (w - 1)) - 0.5;
+        // Y 轴通常需要翻转一下才能对应地图方向
+        points[idx * 3 + 1] = ((h - 1 - j) / (h - 1)) - 0.5;
+        // Z 归一化后乘以缩放系数
+        points[idx * 3 + 2] = ((z[idx] - zmin) / zRange) * Z_SCALE;
+      }
+    }
+
+    // 构建三角网
+    const nCells = (w - 1) * (h - 1) * 2;
     const polys = new Uint32Array(nCells * 4);
     let p = 0;
-    for (let j = 0; j < height - 1; j++) {
-      for (let i = 0; i < width - 1; i++) {
-        const a = j * width + i;
-        const b = j * width + i + 1;
-        const c = (j + 1) * width + i;
-        const d = (j + 1) * width + i + 1;
+    for (let j = 0; j < h - 1; j++) {
+      for (let i = 0; i < w - 1; i++) {
+        const a = j * w + i;
+        const b = j * w + i + 1;
+        const c = (j + 1) * w + i;
+        const d = (j + 1) * w + i + 1;
         polys[p++] = 3; polys[p++] = a; polys[p++] = b; polys[p++] = d;
         polys[p++] = 3; polys[p++] = a; polys[p++] = d; polys[p++] = c;
       }
@@ -705,6 +749,7 @@ function showDEM() {
       })
     );
 
+    // 5. 渲染设置
     demMapper = vtk.Rendering.Core.vtkMapper.newInstance();
     demMapper.setInputData(polydata);
     demMapper.setScalarRange(zmin, zmax);
@@ -712,22 +757,29 @@ function showDEM() {
     demActor = vtk.Rendering.Core.vtkActor.newInstance();
     demActor.setMapper(demMapper);
 
+    // 设置材质让地形更好看
     const prop = demActor.getProperty();
     prop.setInterpolationToPhong();
-    prop.setAmbient(0.25);
-    prop.setDiffuse(0.7);
-    prop.setSpecular(0.15);
+    prop.setAmbient(0.3);
+    prop.setDiffuse(0.8);
+    prop.setSpecular(0.1);
 
     renderer.addActor(demActor);
     applyCMapToDEM();
 
+    // 调整相机
     renderer.resetCamera();
+    // 稍微调整角度，变成俯视斜角
+    const cam = renderer.getActiveCamera();
+    cam.elevation(30);
     renderWindow.render();
 
+    // 更新信息面板
     updateAxisInfo(`
       <strong>DEM 地形数据：</strong><br>
-      网格尺寸: ${width} × ${height}<br>
-      高程范围: ${zmin.toFixed(2)} ~ ${zmax.toFixed(2)}
+      原始尺寸: ${rawWidth} × ${rawHeight}<br>
+      显示网格: ${w} × ${h}<br>
+      高程范围: ${zmin.toFixed(1)} ~ ${zmax.toFixed(1)} m
     `);
 
     console.log("DEM显示成功");
